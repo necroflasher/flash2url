@@ -32,7 +32,15 @@ int makeServer(const(char)* addrStr, out ushort portOut)
 		ai_addr: cast(sockaddr*)&sin,
 	};
 
-	int fd = socket(addr.ai_family, addr.ai_socktype|SOCK_CLOEXEC, addr.ai_protocol);
+	version(CRuntime_Glibc)
+		int fd = socket(addr.ai_family, addr.ai_socktype|SOCK_CLOEXEC, addr.ai_protocol);
+	else
+	{
+		import core.sys.posix.fcntl;
+		int fd = socket(addr.ai_family, addr.ai_socktype, addr.ai_protocol);
+		if (fd >= 0)
+			fcntl(fd, F_SETFD, fcntl(fd, F_GETFD, 0)|FD_CLOEXEC);
+	}
 
 	if (fd == -1)
 	{

@@ -13,6 +13,9 @@ import flash2url.main : CmdLine;
 import flash2url.socket;
 import flash2url.swfparser;
 
+version (FreeBSD)
+	private enum O_CLOEXEC = 0x00100000;
+
 __gshared
 {
 	/// the flash file that was read from stdin
@@ -27,7 +30,15 @@ void runServer(int server, ref const(CmdLine) cmd)
 	serverloop:
 	for (;;)
 	{
-		int client = accept4(server, null, null, SOCK_CLOEXEC);
+		version(linux)
+			int client = accept4(server, null, null, SOCK_CLOEXEC);
+		else
+		{
+			/* above fails on freebsd (why?) */
+			int client = accept(server, null, null);
+			if (client >= 0)
+				fcntl(client, F_SETFD, fcntl(client, F_GETFD, 0)|FD_CLOEXEC);
+		}
 
 		if (client == -1)
 		{
