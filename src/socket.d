@@ -6,7 +6,11 @@ import std.exception;
 public import core.sys.posix.netdb;
 public import core.sys.posix.netinet.tcp;
 
-enum SOCK_CLOEXEC = 0x80000;
+version(linux)
+	enum SOCK_CLOEXEC = 0x80000;
+
+version(FreeBSD)
+	enum SOCK_CLOEXEC = 0x10000000;
 
 enum SOL_TCP = IPPROTO_TCP;
 
