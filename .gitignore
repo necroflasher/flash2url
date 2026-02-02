@@ -1,3 +1,2 @@
 /flash2url
-*.o
-*.so
+/flash2url_unittest

@@ -1,87 +1,90 @@
 module flash2url.socket;
 
+import core.stdc.stdio;
+import core.sys.posix.fcntl;
+import core.sys.posix.netdb;
+import core.sys.posix.netinet.tcp : TCP_NODELAY;
 import core.sys.posix.unistd;
-import std.exception;
 
-public import core.sys.posix.netdb;
-public import core.sys.posix.netinet.tcp;
-
-version(linux)
+version(CRuntime_Glibc)
+{
+	/* /usr/include/x86_64-linux-gnu/bits/socket_type.h */
 	enum SOCK_CLOEXEC = 0x80000;
+}
 
 version(FreeBSD)
 	enum SOCK_CLOEXEC = 0x10000000;
 
-enum SOL_TCP = IPPROTO_TCP;
+/* glibc: /usr/include/arpa/inet.h */
+private extern(C) int inet_aton(const(char)* cp, in_addr* inp);
 
-extern(C) int accept4(int, sockaddr*, socklen_t*, int) nothrow @nogc;
+/* glibc: /usr/include/netinet/tcp.h */
+private enum SOL_TCP = IPPROTO_TCP;
+
+/* glibc: /usr/include/x86_64-linux-gnu/sys/socket.h */
+extern(C) int accept4(
+    int sockfd, sockaddr* addr, socklen_t* addrlen, int flags);
 
 /**
- * make a tcp server on 127.0.0.1 + random port
+ * make a tcp server on the given address + a random port
  */
-int makeServer(const(char)* addrStr, out ushort portOut)
+bool makeServer(const(char)* addrStr, out ushort portOut, out int fdOut)
 {
-	sockaddr_in sin = {
-		sin_family: AF_INET,
-		sin_port: 0,
-		sin_addr: {
-			s_addr: inet_addr(addrStr),
-		},
-	};
-	addrinfo addr = {
-		ai_family: sin.sin_family,
-		ai_socktype: SOCK_STREAM,
-		ai_protocol: IPPROTO_TCP,
-		ai_addrlen: sin.sizeof,
-		ai_addr: cast(sockaddr*)&sin,
-	};
+	sockaddr_in addr;
+	socklen_t len;
+	int fd;
+	int optval;
 
-	version(CRuntime_Glibc)
-		int fd = socket(addr.ai_family, addr.ai_socktype|SOCK_CLOEXEC, addr.ai_protocol);
-	else
+	if (!inet_aton(addrStr, &addr.sin_addr))
 	{
-		import core.sys.posix.fcntl;
-		int fd = socket(addr.ai_family, addr.ai_socktype, addr.ai_protocol);
-		if (fd >= 0)
-			fcntl(fd, F_SETFD, fcntl(fd, F_GETFD, 0)|FD_CLOEXEC);
+		fprintf(stderr, "inet_aton: invalid ip address\n");
+		return false;
 	}
 
-	if (fd == -1)
+	fd = socket(AF_INET, SOCK_STREAM|SOCK_CLOEXEC, IPPROTO_TCP);
+
+	if (fd < 0)
 	{
-		throw new ErrnoException("socket");
+		perror("socket");
+		return false;
 	}
 
-	scope(failure)
+	optval = 1;
+	if (setsockopt(
+	    fd, SOL_TCP, TCP_NODELAY, &optval, optval.sizeof) < 0)
 	{
+		perror("setsockopt TCP_NODELAY");
 		close(fd);
+		return false;
 	}
 
-	const int yes = 1;
-	if (setsockopt(fd, SOL_TCP, TCP_NODELAY, &yes, yes.sizeof) == -1)
+	addr.sin_family = AF_INET;
+	if (bind(fd, cast(sockaddr*)&addr, addr.sizeof) < 0)
 	{
-		throw new ErrnoException("setsockopt TCP_NODELAY");
+		perror("bind");
+		close(fd);
+		return false;
 	}
 
-	if (bind(fd, addr.ai_addr, addr.ai_addrlen) == -1)
+	/* find out what port we were assigned */
+	len = addr.sizeof;
+	if (getsockname(fd, cast(sockaddr*)&addr, &len) < 0)
 	{
-		throw new ErrnoException("bind");
-	}
-
-	// find out what port we were assigned
-	socklen_t len = sin.sizeof;
-	if (getsockname(fd, cast(sockaddr*)&sin, &len) == -1)
-	{
-		throw new ErrnoException("getsockname");
+		perror("getsockname");
+		close(fd);
+		return false;
 	}
 
 	enum backlog = 16;
-
-	if (listen(fd, backlog) == -1)
+	if (listen(fd, backlog) < 0)
 	{
-		throw new ErrnoException("listen");
+		perror("listen");
+		close(fd);
+		return false;
 	}
 
-	portOut = ntohs(sin.sin_port);
+	portOut = ntohs(addr.sin_port);
+	fdOut = fd;
 
-	return fd;
+	return true;
 }

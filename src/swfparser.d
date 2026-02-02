@@ -2,8 +2,8 @@ module flash2url.swfparser;
 
 import core.stdc.stdio;
 import etc.c.zlib;
-import std.array;
-import std.string;
+import std.array : Appender;
+import std.string : fromStringz, toStringz;
 import flash2url.lzma;
 
 /*
@@ -14,9 +14,9 @@ import flash2url.lzma;
  * - tell when there's an error in the file (caller should give up reading tags)
  */
 
-final class SwfReader
+struct SwfReader
 {
-	enum State
+	private enum State
 	{
 		readSwfHeader,
 		readMovieHeader,
@@ -24,25 +24,26 @@ final class SwfReader
 		finished,
 	}
 
-	State state;
-	bool error;
-	bool endOfInput;
+	public SwfHeader           swfHeader;
+	public void delegate(scope const(ubyte)[])
+	/++/                       putDecompressed;
 
-	ubyte[] fileData;
-	Appender!(ubyte[]) swfData;
-	size_t swfDataPos;
+	private State              state;
+	private bool               error;
+	private bool               endOfInput;
 
-	SwfHeader swfHeader;
-	MovieHeader movieHeader;
+	private ubyte[]            fileData;
+	private Appender!(ubyte[]) swfData;
+	private size_t             swfDataPos;
 
-	z_stream zs;
-	lzma_stream lz;
+	private MovieHeader        movieHeader;
 
-	void delegate(scope const(ubyte)[]) putDecompressed;
+	private z_stream           zs;
+	private lzma_stream        lz;
 
-	~this() nothrow @nogc
+	public ~this() nothrow @nogc
 	{
-		// this is harmless if never inited
+		/* harmless if never inited */
 		inflateEnd(&zs);
 		lzma_end(&lz);
 	}
@@ -50,35 +51,46 @@ final class SwfReader
 	/**
 	 * feed more data into the reader
 	 */
-	void put(scope const(ubyte)[] data)
+	public void put(scope const(ubyte)[] data)
 	{
+		if (error)
+			return;
+		if (endOfInput)
+			return;
+
 		if (state == State.readSwfHeader)
 		{
 			putHeaderData(data);
 			return;
 		}
 
-		if (
-			state == State.readMovieHeader ||
-			state == State.readSwfData)
+		if (state == State.readMovieHeader ||
+		    state == State.readSwfData)
 		{
 			putSwfData(data);
 			return;
 		}
 	}
 
-	void putEndOfInput()
+	public void putEndOfInput()
 	{
+		if (endOfInput)
+			return;
 		endOfInput = true;
+
+		if (error)
+			return;
 
 		if (state != State.readSwfData)
 		{
 			error = true;
-			fprintf(stderr, "flash2url: swfparser: parsing incomplete\n");
+			fprintf(stderr,
+			    "flash2url: swfparser:"~
+			    " unexpected end of file\n");
 		}
 	}
 
-	void putHeaderData(scope const(ubyte)[] data)
+	private void putHeaderData(scope const(ubyte)[] data)
 	{
 		fileData ~= data;
 
@@ -87,20 +99,21 @@ final class SwfReader
 
 		swfHeader = *cast(SwfHeader*)&fileData[0];
 
-		enum lzmaExtraSize = 4+1+4;
-		if (
-			swfHeader.isLzmaCompressed &&
-			fileData.length < SwfHeader.sizeof+lzmaExtraSize)
-		{
-			return;
-		}
-
 		if (!swfHeader.isValid)
 		{
 			error = true;
-			fprintf(stderr, "flash2url: swfparser: invalid header\n");
+			fprintf(stderr,
+			    "flash2url: swfparser:"~
+			    " invalid header (not an swf file)\n");
+			return;
 		}
 
+		enum lzmaExtraSize = 4+1+4;
+		if (swfHeader.isLzmaCompressed &&
+		    fileData.length < SwfHeader.sizeof+lzmaExtraSize)
+			return;
+
+		/* pass decompressed swf header */
 		if (putDecompressed)
 		{
 			SwfHeader tmp = swfHeader;
@@ -114,20 +127,30 @@ final class SwfReader
 		{
 			if (int zerr = inflateInit(&zs))
 			{
-				fprintf(stderr, "inflateInit: %s (%d)\n", zError(zerr), zerr);
+				fprintf(stderr,
+				    "inflateInit: %s (%d)\n",
+				    zError(zerr), zerr);
 				assert(0);
 			}
 		}
 		else if (swfHeader.isLzmaCompressed)
 		{
-			lzma_ret ret = lzma_alone_decoder(&lz, /* memoryLimit */ ulong.max);
+			lzma_ret ret;
+
+			ret = lzma_alone_decoder(
+			    &lz,
+			    /* memoryLimit */ ulong.max);
+
 			if (ret != lzma_ret.OK)
 			{
-				fprintf(stderr, "lzma_alone_decoder: %s (%d)\n", lzerror(ret).toStringz, ret);
+				fprintf(stderr,
+				    "lzma_alone_decoder: %s (%d)\n",
+				    lzerror(ret).toStringz, ret);
 				assert(0);
 			}
 
-			fileData = fileData[4..$]; // uint lzmaBodySize
+			/*  uint lzmaBodySize */
+			fileData = fileData[4..$];
 
 			struct LzmaHeader
 			{
@@ -149,11 +172,24 @@ final class SwfReader
 			fileData = fileData[5..$];
 
 			ubyte[] headerBytes = lzmaHeader.asBytes;
-			ret = unlz(lz, headerBytes, (scope _) { return lzma_ret.OK; });
+
+			scope cb = delegate (ubyte[] buf)
+			{
+				/* header produces no data */
+				assert(!buf.length);
+				return lzma_ret.OK;
+			};
+
+			ret = unlz(lz, headerBytes, cb);
+
 			if (ret != lzma_ret.OK)
 			{
 				error = true;
-				fprintf(stderr, "lzma header error: %s (%d)\n", lzerror(ret).toStringz, ret);
+				fprintf(stderr,
+				    "flash2url: swfparser:"~
+				    " lzma header error: %s (%d)\n",
+				    lzerror(ret).toStringz, ret);
+				return;
 			}
 		}
 
@@ -165,7 +201,7 @@ final class SwfReader
 		}
 	}
 
-	void putSwfData(scope const(ubyte)[] data)
+	private void putSwfData(scope const(ubyte)[] data)
 	{
 		scope xput = (scope const(ubyte)[] buf)
 		{
@@ -183,12 +219,17 @@ final class SwfReader
 			int zerr = unzlib(zs, data, (scope buf)
 			{
 				xput(buf);
-				return 0;
+				return Z_OK;
 			});
 			if (zerr != Z_OK)
 			{
 				error = true;
-				fprintf(stderr, "zlib decompression error: %s (%d)\n", zError(zerr), zerr);
+				fprintf(stderr,
+				    "flash2url: swfparser:"~
+				    " zlib decompression error:"~
+				    " %s (%d)\n",
+				    zError(zerr), zerr);
+				return;
 			}
 		}
 		else if (swfHeader.isLzmaCompressed)
@@ -201,7 +242,12 @@ final class SwfReader
 			if (ret != lzma_ret.OK)
 			{
 				error = true;
-				fprintf(stderr, "lzma decompression error: %s (%d)\n", lzerror(ret).toStringz, ret);
+				fprintf(stderr,
+				    "flash2url: swfparser:"~
+				    " lzma decompression error:"~
+				    " %s (%d)\n",
+				    lzerror(ret).toStringz, ret);
+				return;
 			}
 		}
 		else
@@ -211,7 +257,7 @@ final class SwfReader
 
 		if (state == State.readMovieHeader)
 		{
-			scope br = new SwfBitReader(swfData[]);
+			auto br = SwfBitReader(swfData[]);
 
 			movieHeader.display = br.readRect();
 			movieHeader.frameRate = br.readFixed(8, 8);
@@ -228,30 +274,26 @@ final class SwfReader
 	/**
 	 * try to advance to the next tag
 	 */
-	bool nextTag(out SwfTagInfo tagOut)
+	public bool nextTag(out SwfTagInfo tagOut)
 	{
 		if (state != State.readSwfData)
-		{
 			return false;
-		}
 
-		scope br = new SwfBitReader( (swfData[])[swfDataPos..$] );
+		auto br = SwfBitReader((swfData[])[swfDataPos..$]);
 
 		if (!br.totalBits && endOfInput)
 		{
-			// some files end without an end tag
+			/* ended cleanly without an end tag */
 			state = State.finished;
 			return false;
 		}
 
 		uint x = br.readUI(16);
-		uint tag = x >> 6;
-		size_t length = x & 0b111111;
+		uint tag = (x >> 6);
+		size_t length = (x & 0b111111);
 
 		if (length == 0x3f)
-		{
 			length = br.readUI(32);
-		}
 
 		const(ubyte)[] tagData = br.readBytesNoCopy(length);
 
@@ -274,12 +316,59 @@ final class SwfReader
 	}
 }
 
+struct SwfHeader
+{
+	char[3] signature;
+	ubyte   swfVersion;
+	uint    fileSize;
+
+	bool isValid()
+	{
+		switch (signature)
+		{
+		case "FWS":
+		case "CWS":
+		case "ZWS":
+			/* prevent underflow in the lzma header code */
+			return (fileSize >= 8);
+		default:
+			return false;
+		}
+	}
+
+	bool isCompressed()
+	{
+		return signature[0] != 'F';
+	}
+
+	bool isZlibCompressed()
+	{
+		return signature[0] == 'C';
+	}
+
+	bool isLzmaCompressed()
+	{
+		return signature[0] == 'Z';
+	}
+}
+
+struct SwfTagInfo
+{
+	uint           code;
+	const(ubyte)[] data;
+}
+
+private:
+
 ref inout(ubyte)[T.sizeof] asBytes(T)(return ref inout(T) val)
 {
 	return *cast(ubyte[T.sizeof]*)&val;
 }
 
-int unzlib(ref z_stream zs, ref inout(ubyte)[] inbuf, scope int delegate(scope ubyte[]) cb)
+int unzlib(
+	ref z_stream                      zs,
+	ref inout(ubyte)[]                inbuf,
+	scope int delegate(scope ubyte[]) cb)
 {
 	ubyte[4*16*1024] outbuf = void;
 
@@ -324,7 +413,10 @@ int unzlib(ref z_stream zs, ref inout(ubyte)[] inbuf, scope int delegate(scope u
 	}
 }
 
-lzma_ret unlz(ref lzma_stream zs, ref inout(ubyte)[] inbuf, scope lzma_ret delegate(scope ubyte[]) cb)
+lzma_ret unlz(
+	ref lzma_stream                        zs,
+	ref inout(ubyte)[]                     inbuf,
+	scope lzma_ret delegate(scope ubyte[]) cb)
 {
 	ubyte[4*16*1024] outbuf = void;
 
@@ -368,45 +460,47 @@ lzma_ret unlz(ref lzma_stream zs, ref inout(ubyte)[] inbuf, scope lzma_ret deleg
 
 string lzerror(lzma_ret ret)
 {
-	// descriptions from <lzma/base.h>
+	/* descriptions from <lzma/base.h> */
 	switch (ret)
 	{
-		case lzma_ret.OK:
-			return "Operation completed successfully";
-		case lzma_ret.STREAM_END:
-			return "End of stream was reached";
-		case lzma_ret.NO_CHECK:
-			return "Input stream has no integrity check";
-		case lzma_ret.UNSUPPORTED_CHECK:
-			return "Cannot calculate the integrity check";
-		case lzma_ret.GET_CHECK:
-			return "Integrity check type is now available";
-		case lzma_ret.MEM_ERROR:
-			return "Cannot allocate memory";
-		case lzma_ret.MEMLIMIT_ERROR:
-			return "Memory usage limit was reached";
-		case lzma_ret.FORMAT_ERROR:
-			return "File format not recognized";
-		case lzma_ret.OPTIONS_ERROR:
-			return "Invalid or unsupported options";
-		case lzma_ret.DATA_ERROR:
-			return "Data is corrupt";
-		case lzma_ret.BUF_ERROR:
-			return "No progress is possible";
-		case lzma_ret.PROG_ERROR:
-			return "Programming error";
-		default:
-			char[64] buf = void;
-			snprintf(buf.ptr, buf.length, "%d", ret);
-			return buf.fromStringz.idup;
+	case lzma_ret.OK:
+		return "Operation completed successfully";
+	case lzma_ret.STREAM_END:
+		return "End of stream was reached";
+	case lzma_ret.NO_CHECK:
+		return "Input stream has no integrity check";
+	case lzma_ret.UNSUPPORTED_CHECK:
+		return "Cannot calculate the integrity check";
+	case lzma_ret.GET_CHECK:
+		return "Integrity check type is now available";
+	case lzma_ret.MEM_ERROR:
+		return "Cannot allocate memory";
+	case lzma_ret.MEMLIMIT_ERROR:
+		return "Memory usage limit was reached";
+	case lzma_ret.FORMAT_ERROR:
+		return "File format not recognized";
+	case lzma_ret.OPTIONS_ERROR:
+		return "Invalid or unsupported options";
+	case lzma_ret.DATA_ERROR:
+		return "Data is corrupt";
+	case lzma_ret.BUF_ERROR:
+		return "No progress is possible";
+	case lzma_ret.PROG_ERROR:
+		return "Programming error";
+	default:
+	{
+		char[64] buf = void;
+		snprintf(buf.ptr, buf.length, "%d", ret);
+		return buf.fromStringz.idup;
+	}
 	}
 }
 
-final class SwfBitReader
+struct SwfBitReader
 {
 	const(ubyte)[] data;
-	ulong curBit;
-	bool overflow;
+	ulong          curBit;
+	bool           overflow;
 
 	this(ubyte[] data_)
 	{
@@ -534,15 +628,15 @@ final class SwfBitReader
 		uint rv;
 		final switch (numbits)
 		{
-			case 8:
-				rv = *cast(ubyte*)&data[curByte];
-				break;
-			case 16:
-				rv = *cast(ushort*)&data[curByte];
-				break;
-			case 32:
-				rv = *cast(uint*)&data[curByte];
-				break;
+		case 8:
+			rv = *cast(ubyte*)&data[curByte];
+			break;
+		case 16:
+			rv = *cast(ushort*)&data[curByte];
+			break;
+		case 32:
+			rv = *cast(uint*)&data[curByte];
+			break;
 		}
 		curBit += numbits;
 		return rv;
@@ -560,47 +654,6 @@ final class SwfBitReader
 	}
 }
 
-struct SwfTagInfo
-{
-	uint code;
-	const(ubyte)[] data;
-}
-
-struct SwfHeader
-{
-	char[3] signature;
-	ubyte swfVersion;
-	uint fileSize; /// total size of the uncompressed .swf, includes this header
-
-	bool isValid()
-	{
-		switch (signature)
-		{
-			case "FWS":
-			case "CWS":
-			case "ZWS":
-				return true;
-			default:
-				return false;
-		}
-	}
-
-	bool isCompressed()
-	{
-		return signature[0] != 'F';
-	}
-
-	bool isZlibCompressed()
-	{
-		return signature[0] == 'C';
-	}
-
-	bool isLzmaCompressed()
-	{
-		return signature[0] == 'Z';
-	}
-}
-
 struct MovieHeader
 {
 	Rect   display;
@@ -614,14 +667,4 @@ struct Rect
 	int xmax;
 	int ymin;
 	int ymax;
-
-	double pixelWidth()
-	{
-		return (xmax - xmin) / 20.0;
-	}
-
-	double pixelHeight()
-	{
-		return (ymax - ymin) / 20.0;
-	}
 }
